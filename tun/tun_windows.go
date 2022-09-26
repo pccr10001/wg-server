@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2022 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2018-2021 WireGuard LLC. All Rights Reserved.
  */
 
 package tun
@@ -26,10 +26,10 @@ const (
 )
 
 type rateJuggler struct {
-	current       atomic.Uint64
-	nextByteCount atomic.Uint64
-	nextStartTime atomic.Int64
-	changing      atomic.Bool
+	current       uint64
+	nextByteCount uint64
+	nextStartTime int64
+	changing      int32
 }
 
 type NativeTun struct {
@@ -42,7 +42,7 @@ type NativeTun struct {
 	events    chan Event
 	running   sync.WaitGroup
 	closeOnce sync.Once
-	close     atomic.Bool
+	close     int32
 	forcedMTU int
 }
 
@@ -57,14 +57,18 @@ func procyield(cycles uint32)
 //go:linkname nanotime runtime.nanotime
 func nanotime() int64
 
+//
 // CreateTUN creates a Wintun interface with the given name. Should a Wintun
 // interface with the same name exist, it is reused.
+//
 func CreateTUN(ifname string, mtu int) (Device, error) {
 	return CreateTUNWithRequestedGUID(ifname, WintunStaticRequestedGUID, mtu)
 }
 
+//
 // CreateTUNWithRequestedGUID creates a Wintun interface with the given name and
 // a requested GUID. Should a Wintun interface with the same name exist, it is reused.
+//
 func CreateTUNWithRequestedGUID(ifname string, requestedGUID *windows.GUID, mtu int) (Device, error) {
 	wt, err := wintun.CreateAdapter(ifname, WintunTunnelType, requestedGUID)
 	if err != nil {
@@ -109,7 +113,7 @@ func (tun *NativeTun) Events() chan Event {
 func (tun *NativeTun) Close() error {
 	var err error
 	tun.closeOnce.Do(func() {
-		tun.close.Store(true)
+		atomic.StoreInt32(&tun.close, 1)
 		windows.SetEvent(tun.readWait)
 		tun.running.Wait()
 		tun.session.End()
@@ -140,13 +144,13 @@ func (tun *NativeTun) Read(buff []byte, offset int) (int, error) {
 	tun.running.Add(1)
 	defer tun.running.Done()
 retry:
-	if tun.close.Load() {
+	if atomic.LoadInt32(&tun.close) == 1 {
 		return 0, os.ErrClosed
 	}
 	start := nanotime()
-	shouldSpin := tun.rate.current.Load() >= spinloopRateThreshold && uint64(start-tun.rate.nextStartTime.Load()) <= rateMeasurementGranularity*2
+	shouldSpin := atomic.LoadUint64(&tun.rate.current) >= spinloopRateThreshold && uint64(start-atomic.LoadInt64(&tun.rate.nextStartTime)) <= rateMeasurementGranularity*2
 	for {
-		if tun.close.Load() {
+		if atomic.LoadInt32(&tun.close) == 1 {
 			return 0, os.ErrClosed
 		}
 		packet, err := tun.session.ReceivePacket()
@@ -180,7 +184,7 @@ func (tun *NativeTun) Flush() error {
 func (tun *NativeTun) Write(buff []byte, offset int) (int, error) {
 	tun.running.Add(1)
 	defer tun.running.Done()
-	if tun.close.Load() {
+	if atomic.LoadInt32(&tun.close) == 1 {
 		return 0, os.ErrClosed
 	}
 
@@ -206,7 +210,7 @@ func (tun *NativeTun) Write(buff []byte, offset int) (int, error) {
 func (tun *NativeTun) LUID() uint64 {
 	tun.running.Add(1)
 	defer tun.running.Done()
-	if tun.close.Load() {
+	if atomic.LoadInt32(&tun.close) == 1 {
 		return 0
 	}
 	return tun.wt.LUID()
@@ -219,15 +223,15 @@ func (tun *NativeTun) RunningVersion() (version uint32, err error) {
 
 func (rate *rateJuggler) update(packetLen uint64) {
 	now := nanotime()
-	total := rate.nextByteCount.Add(packetLen)
-	period := uint64(now - rate.nextStartTime.Load())
+	total := atomic.AddUint64(&rate.nextByteCount, packetLen)
+	period := uint64(now - atomic.LoadInt64(&rate.nextStartTime))
 	if period >= rateMeasurementGranularity {
-		if !rate.changing.CompareAndSwap(false, true) {
+		if !atomic.CompareAndSwapInt32(&rate.changing, 0, 1) {
 			return
 		}
-		rate.nextStartTime.Store(now)
-		rate.current.Store(total * uint64(time.Second/time.Nanosecond) / period)
-		rate.nextByteCount.Store(0)
-		rate.changing.Store(false)
+		atomic.StoreInt64(&rate.nextStartTime, now)
+		atomic.StoreUint64(&rate.current, total*uint64(time.Second/time.Nanosecond)/period)
+		atomic.StoreUint64(&rate.nextByteCount, 0)
+		atomic.StoreInt32(&rate.changing, 0)
 	}
 }

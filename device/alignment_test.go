@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2021 WireGuard LLC. All Rights Reserved.
  */
 
-package tun
+package device
 
 import (
 	"reflect"
@@ -18,15 +18,15 @@ func checkAlignment(t *testing.T, name string, offset uintptr) {
 	}
 }
 
-// TestRateJugglerAlignment checks that atomically-accessed fields are
+// TestPeerAlignment checks that atomically-accessed fields are
 // aligned to 64-bit boundaries, as required by the atomic package.
 //
 // Unfortunately, violating this rule on 32-bit platforms results in a
 // hard segfault at runtime.
-func TestRateJugglerAlignment(t *testing.T) {
-	var r rateJuggler
+func TestPeerAlignment(t *testing.T) {
+	var p Peer
 
-	typ := reflect.TypeOf(&r).Elem()
+	typ := reflect.TypeOf(&p).Elem()
 	t.Logf("Peer type size: %d, with fields:", typ.Size())
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
@@ -38,21 +38,20 @@ func TestRateJugglerAlignment(t *testing.T) {
 		)
 	}
 
-	checkAlignment(t, "rateJuggler.current", unsafe.Offsetof(r.current))
-	checkAlignment(t, "rateJuggler.nextByteCount", unsafe.Offsetof(r.nextByteCount))
-	checkAlignment(t, "rateJuggler.nextStartTime", unsafe.Offsetof(r.nextStartTime))
+	checkAlignment(t, "Peer.stats", unsafe.Offsetof(p.stats))
+	checkAlignment(t, "Peer.isRunning", unsafe.Offsetof(p.isRunning))
 }
 
-// TestNativeTunAlignment checks that atomically-accessed fields are
+// TestDeviceAlignment checks that atomically-accessed fields are
 // aligned to 64-bit boundaries, as required by the atomic package.
 //
 // Unfortunately, violating this rule on 32-bit platforms results in a
 // hard segfault at runtime.
-func TestNativeTunAlignment(t *testing.T) {
-	var tun NativeTun
+func TestDeviceAlignment(t *testing.T) {
+	var d Device
 
-	typ := reflect.TypeOf(&tun).Elem()
-	t.Logf("Peer type size: %d, with fields:", typ.Size())
+	typ := reflect.TypeOf(&d).Elem()
+	t.Logf("Device type size: %d, with fields:", typ.Size())
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
 		t.Logf("\t%30s\toffset=%3v\t(type size=%3d, align=%d)",
@@ -62,6 +61,5 @@ func TestNativeTunAlignment(t *testing.T) {
 			field.Type.Align(),
 		)
 	}
-
-	checkAlignment(t, "NativeTun.rate", unsafe.Offsetof(tun.rate))
+	checkAlignment(t, "Device.rate.underLoadUntil", unsafe.Offsetof(d.rate)+unsafe.Offsetof(d.rate.underLoadUntil))
 }

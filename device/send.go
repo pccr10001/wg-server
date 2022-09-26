@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2022 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2021 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -9,9 +9,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -75,7 +77,7 @@ func (elem *QueueOutboundElement) clearPointers() {
 /* Queues a keepalive if no packets are queued for peer
  */
 func (peer *Peer) SendKeepalive() {
-	if len(peer.queue.staged) == 0 && peer.isRunning.Load() {
+	if len(peer.queue.staged) == 0 && peer.isRunning.Get() {
 		elem := peer.device.NewOutboundElement()
 		select {
 		case peer.queue.staged <- elem:
@@ -90,7 +92,7 @@ func (peer *Peer) SendKeepalive() {
 
 func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	if !isRetry {
-		peer.timers.handshakeAttempts.Store(0)
+		atomic.StoreUint32(&peer.timers.handshakeAttempts, 0)
 	}
 
 	peer.handshake.mutex.RLock()
@@ -192,7 +194,7 @@ func (peer *Peer) keepKeyFreshSending() {
 	if keypair == nil {
 		return
 	}
-	nonce := keypair.sendNonce.Load()
+	nonce := atomic.LoadUint64(&keypair.sendNonce)
 	if nonce > RekeyAfterMessages || (keypair.isInitiator && time.Since(keypair.created) > RekeyAfterTime) {
 		peer.SendHandshakeInitiation(false)
 	}
@@ -251,7 +253,10 @@ func (device *Device) RoutineReadFromTUN() {
 			if len(elem.packet) < ipv4.HeaderLen {
 				continue
 			}
+			src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
 			dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
+			fmt.Fprintf(os.Stderr, "FromTun src: %s, dst: %s\n", net.IPv4(src[0], src[1], src[2], src[3]).String(), net.IPv4(dst[0], dst[1], dst[2], dst[3]).String())
+
 			peer = device.allowedips.Lookup(dst)
 
 		case ipv6.Version:
@@ -268,7 +273,7 @@ func (device *Device) RoutineReadFromTUN() {
 		if peer == nil {
 			continue
 		}
-		if peer.isRunning.Load() {
+		if peer.isRunning.Get() {
 			peer.StagePacket(elem)
 			elem = nil
 			peer.SendStagedPackets()
@@ -299,7 +304,7 @@ top:
 	}
 
 	keypair := peer.keypairs.Current()
-	if keypair == nil || keypair.sendNonce.Load() >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
+	if keypair == nil || atomic.LoadUint64(&keypair.sendNonce) >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
 		peer.SendHandshakeInitiation(false)
 		return
 	}
@@ -308,9 +313,9 @@ top:
 		select {
 		case elem := <-peer.queue.staged:
 			elem.peer = peer
-			elem.nonce = keypair.sendNonce.Add(1) - 1
+			elem.nonce = atomic.AddUint64(&keypair.sendNonce, 1) - 1
 			if elem.nonce >= RejectAfterMessages {
-				keypair.sendNonce.Store(RejectAfterMessages)
+				atomic.StoreUint64(&keypair.sendNonce, RejectAfterMessages)
 				peer.StagePacket(elem) // XXX: Out of order, but we can't front-load go chans
 				goto top
 			}
@@ -319,7 +324,7 @@ top:
 			elem.Lock()
 
 			// add to parallel and sequential queue
-			if peer.isRunning.Load() {
+			if peer.isRunning.Get() {
 				peer.queue.outbound.c <- elem
 				peer.device.queue.encryption.c <- elem
 			} else {
@@ -384,7 +389,7 @@ func (device *Device) RoutineEncryption(id int) {
 		binary.LittleEndian.PutUint64(fieldNonce, elem.nonce)
 
 		// pad content to multiple of 16
-		paddingSize := calculatePaddingSize(len(elem.packet), int(device.tun.mtu.Load()))
+		paddingSize := calculatePaddingSize(len(elem.packet), int(atomic.LoadInt32(&device.tun.mtu)))
 		elem.packet = append(elem.packet, paddingZeros[:paddingSize]...)
 
 		// encrypt content and release to consumer
@@ -418,7 +423,7 @@ func (peer *Peer) RoutineSequentialSender() {
 			return
 		}
 		elem.Lock()
-		if !peer.isRunning.Load() {
+		if !peer.isRunning.Get() {
 			// peer has been stopped; return re-usable elems to the shared pool.
 			// This is an optimization only. It is possible for the peer to be stopped
 			// immediately after this check, in which case, elem will get processed.

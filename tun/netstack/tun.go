@@ -1,12 +1,11 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2022 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2019-2021 WireGuard LLC. All Rights Reserved.
  */
 
 package netstack
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -24,11 +23,10 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"golang.org/x/net/dns/dnsmessage"
-	"gvisor.dev/gvisor/pkg/bufferv2"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -39,16 +37,69 @@ import (
 )
 
 type netTun struct {
-	ep             *channel.Endpoint
 	stack          *stack.Stack
+	dispatcher     stack.NetworkDispatcher
 	events         chan tun.Event
-	incomingPacket chan *bufferv2.View
+	incomingPacket chan buffer.VectorisedView
 	mtu            int
 	dnsServers     []netip.Addr
 	hasV4, hasV6   bool
 }
 
-type Net netTun
+type (
+	endpoint netTun
+	Net      netTun
+)
+
+func (e *endpoint) Attach(dispatcher stack.NetworkDispatcher) {
+	e.dispatcher = dispatcher
+}
+
+func (e *endpoint) IsAttached() bool {
+	return e.dispatcher != nil
+}
+
+func (e *endpoint) MTU() uint32 {
+	mtu, err := (*netTun)(e).MTU()
+	if err != nil {
+		panic(err)
+	}
+	return uint32(mtu)
+}
+
+func (*endpoint) Capabilities() stack.LinkEndpointCapabilities {
+	return stack.CapabilityNone
+}
+
+func (*endpoint) MaxHeaderLength() uint16 {
+	return 0
+}
+
+func (*endpoint) LinkAddress() tcpip.LinkAddress {
+	return ""
+}
+
+func (*endpoint) Wait() {}
+
+func (e *endpoint) WritePacket(_ stack.RouteInfo, _ tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) tcpip.Error {
+	e.incomingPacket <- buffer.NewVectorisedView(pkt.Size(), pkt.Views())
+	return nil
+}
+
+func (e *endpoint) WritePackets(stack.RouteInfo, stack.PacketBufferList, tcpip.NetworkProtocolNumber) (int, tcpip.Error) {
+	panic("not implemented")
+}
+
+func (e *endpoint) WriteRawPacket(*stack.PacketBuffer) tcpip.Error {
+	panic("not implemented")
+}
+
+func (*endpoint) ARPHardwareType() header.ARPHardwareType {
+	return header.ARPHardwareNone
+}
+
+func (e *endpoint) AddHeader(tcpip.LinkAddress, tcpip.LinkAddress, tcpip.NetworkProtocolNumber, *stack.PacketBuffer) {
+}
 
 func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device, *Net, error) {
 	opts := stack.Options{
@@ -57,15 +108,13 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 		HandleLocal:        true,
 	}
 	dev := &netTun{
-		ep:             channel.New(1024, uint32(mtu), ""),
 		stack:          stack.New(opts),
 		events:         make(chan tun.Event, 10),
-		incomingPacket: make(chan *bufferv2.View),
+		incomingPacket: make(chan buffer.VectorisedView),
 		dnsServers:     dnsServers,
 		mtu:            mtu,
 	}
-	dev.ep.AddNotify(dev)
-	tcpipErr := dev.stack.CreateNIC(1, dev.ep)
+	tcpipErr := dev.stack.CreateNIC(1, (*endpoint)(dev))
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}
@@ -118,7 +167,6 @@ func (tun *netTun) Read(buf []byte, offset int) (int, error) {
 	if !ok {
 		return 0, os.ErrClosed
 	}
-
 	return view.Read(buf[offset:])
 }
 
@@ -128,27 +176,15 @@ func (tun *netTun) Write(buf []byte, offset int) (int, error) {
 		return 0, nil
 	}
 
-	pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: bufferv2.MakeWithData(packet)})
+	pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Data: buffer.NewVectorisedView(len(packet), []buffer.View{buffer.NewViewFromBytes(packet)})})
 	switch packet[0] >> 4 {
 	case 4:
-		tun.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
+		tun.dispatcher.DeliverNetworkPacket("", "", ipv4.ProtocolNumber, pkb)
 	case 6:
-		tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
+		tun.dispatcher.DeliverNetworkPacket("", "", ipv6.ProtocolNumber, pkb)
 	}
 
 	return len(buf), nil
-}
-
-func (tun *netTun) WriteNotify() {
-	pkt := tun.ep.Read()
-	if pkt == nil {
-		return
-	}
-
-	view := pkt.ToView()
-	pkt.DecRef()
-
-	tun.incomingPacket <- view
 }
 
 func (tun *netTun) Flush() error {
@@ -161,13 +197,9 @@ func (tun *netTun) Close() error {
 	if tun.events != nil {
 		close(tun.events)
 	}
-
-	tun.ep.Close()
-
 	if tun.incomingPacket != nil {
 		close(tun.incomingPacket)
 	}
-
 	return nil
 }
 
@@ -402,10 +434,11 @@ func (pc *PingConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, fmt.Errorf("ping write: mismatched protocols")
 	}
 
-	buf := bytes.NewReader(p)
+	buf := buffer.NewViewFromBytes(p)
+	rdr := buf.Reader()
 	rfa, _ := convertToFullAddr(netip.AddrPortFrom(na, 0))
 	// won't block, no deadlines
-	n64, tcpipErr := pc.ep.Write(buf, tcpip.WriteOptions{
+	n64, tcpipErr := pc.ep.Write(&rdr, tcpip.WriteOptions{
 		To: &rfa,
 	})
 	if tcpipErr != nil {
@@ -420,8 +453,8 @@ func (pc *PingConn) Write(p []byte) (n int, err error) {
 }
 
 func (pc *PingConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	e, notifyCh := waiter.NewChannelEntry(waiter.EventIn)
-	pc.wq.EventRegister(&e)
+	e, notifyCh := waiter.NewChannelEntry(nil)
+	pc.wq.EventRegister(&e, waiter.EventIn)
 	defer pc.wq.EventUnregister(&e)
 
 	select {
@@ -455,7 +488,7 @@ func (pc *PingConn) SetDeadline(t time.Time) error {
 }
 
 func (pc *PingConn) SetReadDeadline(t time.Time) error {
-	pc.deadline.Reset(time.Until(t))
+	pc.deadline.Reset(t.Sub(time.Now()))
 	return nil
 }
 

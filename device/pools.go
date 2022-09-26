@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2022 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2021 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -14,7 +14,7 @@ type WaitPool struct {
 	pool  sync.Pool
 	cond  sync.Cond
 	lock  sync.Mutex
-	count atomic.Uint32
+	count uint32
 	max   uint32
 }
 
@@ -27,10 +27,10 @@ func NewWaitPool(max uint32, new func() any) *WaitPool {
 func (p *WaitPool) Get() any {
 	if p.max != 0 {
 		p.lock.Lock()
-		for p.count.Load() >= p.max {
+		for atomic.LoadUint32(&p.count) >= p.max {
 			p.cond.Wait()
 		}
-		p.count.Add(1)
+		atomic.AddUint32(&p.count, 1)
 		p.lock.Unlock()
 	}
 	return p.pool.Get()
@@ -41,7 +41,7 @@ func (p *WaitPool) Put(x any) {
 	if p.max == 0 {
 		return
 	}
-	p.count.Add(^uint32(0))
+	atomic.AddUint32(&p.count, ^uint32(0))
 	p.cond.Signal()
 }
 

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2022 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2021 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -16,16 +16,24 @@ import (
 )
 
 type Peer struct {
-	isRunning         atomic.Bool
-	sync.RWMutex      // Mostly protects endpoint, but is generally taken whenever we modify peer
-	keypairs          Keypairs
-	handshake         Handshake
-	device            *Device
-	endpoint          conn.Endpoint
-	stopping          sync.WaitGroup // routines pending stop
-	txBytes           atomic.Uint64  // bytes send to peer (endpoint)
-	rxBytes           atomic.Uint64  // bytes received from peer
-	lastHandshakeNano atomic.Int64   // nano seconds since epoch
+	isRunning    AtomicBool
+	sync.RWMutex // Mostly protects endpoint, but is generally taken whenever we modify peer
+	keypairs     Keypairs
+	handshake    Handshake
+	device       *Device
+	endpoint     conn.Endpoint
+	stopping     sync.WaitGroup // routines pending stop
+
+	// These fields are accessed with atomic operations, which must be
+	// 64-bit aligned even on 32-bit platforms. Go guarantees that an
+	// allocated struct will be 64-bit aligned. So we place
+	// atomically-accessed fields up front, so that they can share in
+	// this alignment before smaller fields throw it off.
+	stats struct {
+		txBytes           uint64 // bytes send to peer (endpoint)
+		rxBytes           uint64 // bytes received from peer
+		lastHandshakeNano int64  // nano seconds since epoch
+	}
 
 	disableRoaming bool
 
@@ -35,9 +43,9 @@ type Peer struct {
 		newHandshake            *Timer
 		zeroKeyMaterial         *Timer
 		persistentKeepalive     *Timer
-		handshakeAttempts       atomic.Uint32
-		needAnotherKeepalive    atomic.Bool
-		sentLastMinuteHandshake atomic.Bool
+		handshakeAttempts       uint32
+		needAnotherKeepalive    AtomicBool
+		sentLastMinuteHandshake AtomicBool
 	}
 
 	state struct {
@@ -52,7 +60,7 @@ type Peer struct {
 
 	cookieGenerator             CookieGenerator
 	trieEntries                 list.List
-	persistentKeepaliveInterval atomic.Uint32
+	persistentKeepaliveInterval uint32 // accessed atomically
 }
 
 func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
@@ -125,7 +133,7 @@ func (peer *Peer) SendBuffer(buffer []byte) error {
 
 	err := peer.device.net.bind.Send(buffer, peer.endpoint)
 	if err == nil {
-		peer.txBytes.Add(uint64(len(buffer)))
+		atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
 	}
 	return err
 }
@@ -166,7 +174,7 @@ func (peer *Peer) Start() {
 	peer.state.Lock()
 	defer peer.state.Unlock()
 
-	if peer.isRunning.Load() {
+	if peer.isRunning.Get() {
 		return
 	}
 
@@ -190,7 +198,7 @@ func (peer *Peer) Start() {
 	go peer.RoutineSequentialSender()
 	go peer.RoutineSequentialReceiver()
 
-	peer.isRunning.Store(true)
+	peer.isRunning.Set(true)
 }
 
 func (peer *Peer) ZeroAndFlushAll() {
@@ -202,10 +210,10 @@ func (peer *Peer) ZeroAndFlushAll() {
 	keypairs.Lock()
 	device.DeleteKeypair(keypairs.previous)
 	device.DeleteKeypair(keypairs.current)
-	device.DeleteKeypair(keypairs.next.Load())
+	device.DeleteKeypair(keypairs.loadNext())
 	keypairs.previous = nil
 	keypairs.current = nil
-	keypairs.next.Store(nil)
+	keypairs.storeNext(nil)
 	keypairs.Unlock()
 
 	// clear handshake state
@@ -230,10 +238,11 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 	keypairs := &peer.keypairs
 	keypairs.Lock()
 	if keypairs.current != nil {
-		keypairs.current.sendNonce.Store(RejectAfterMessages)
+		atomic.StoreUint64(&keypairs.current.sendNonce, RejectAfterMessages)
 	}
-	if next := keypairs.next.Load(); next != nil {
-		next.sendNonce.Store(RejectAfterMessages)
+	if keypairs.next != nil {
+		next := keypairs.loadNext()
+		atomic.StoreUint64(&next.sendNonce, RejectAfterMessages)
 	}
 	keypairs.Unlock()
 }

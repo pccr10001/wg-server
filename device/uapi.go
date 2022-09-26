@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2022 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2021 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/ipc"
@@ -111,15 +112,15 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 					sendf("endpoint=%s", peer.endpoint.DstToString())
 				}
 
-				nano := peer.lastHandshakeNano.Load()
+				nano := atomic.LoadInt64(&peer.stats.lastHandshakeNano)
 				secs := nano / time.Second.Nanoseconds()
 				nano %= time.Second.Nanoseconds()
 
 				sendf("last_handshake_time_sec=%d", secs)
 				sendf("last_handshake_time_nsec=%d", nano)
-				sendf("tx_bytes=%d", peer.txBytes.Load())
-				sendf("rx_bytes=%d", peer.rxBytes.Load())
-				sendf("persistent_keepalive_interval=%d", peer.persistentKeepaliveInterval.Load())
+				sendf("tx_bytes=%d", atomic.LoadUint64(&peer.stats.txBytes))
+				sendf("rx_bytes=%d", atomic.LoadUint64(&peer.stats.rxBytes))
+				sendf("persistent_keepalive_interval=%d", atomic.LoadUint32(&peer.persistentKeepaliveInterval))
 
 				device.allowedips.EntriesForPeer(peer, func(prefix netip.Prefix) bool {
 					sendf("allowed_ip=%s", prefix.String())
@@ -357,7 +358,7 @@ func (device *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error 
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set persistent keepalive interval: %w", err)
 		}
 
-		old := peer.persistentKeepaliveInterval.Swap(uint32(secs))
+		old := atomic.SwapUint32(&peer.persistentKeepaliveInterval, uint32(secs))
 
 		// Send immediate keepalive if we're turning it on and before it wasn't on.
 		peer.pkaOn = old == 0 && secs != 0
@@ -408,6 +409,9 @@ func (device *Device) IpcSet(uapiConf string) error {
 }
 
 func (device *Device) IpcHandle(socket net.Conn) {
+
+	// create buffered read/writer
+
 	defer socket.Close()
 
 	buffered := func(s io.ReadWriter) *bufio.ReadWriter {
@@ -416,44 +420,34 @@ func (device *Device) IpcHandle(socket net.Conn) {
 		return bufio.NewReadWriter(reader, writer)
 	}(socket)
 
-	for {
-		op, err := buffered.ReadString('\n')
-		if err != nil {
-			return
-		}
+	defer buffered.Flush()
 
-		// handle operation
-		switch op {
-		case "set=1\n":
-			err = device.IpcSetOperation(buffered.Reader)
-		case "get=1\n":
-			var nextByte byte
-			nextByte, err = buffered.ReadByte()
-			if err != nil {
-				return
-			}
-			if nextByte != '\n' {
-				err = ipcErrorf(ipc.IpcErrorInvalid, "trailing character in UAPI get: %q", nextByte)
-				break
-			}
-			err = device.IpcGetOperation(buffered.Writer)
-		default:
-			device.log.Errorf("invalid UAPI operation: %v", op)
-			return
-		}
+	op, err := buffered.ReadString('\n')
+	if err != nil {
+		return
+	}
 
-		// write status
-		var status *IPCError
-		if err != nil && !errors.As(err, &status) {
-			// shouldn't happen
-			status = ipcErrorf(ipc.IpcErrorUnknown, "other UAPI error: %w", err)
-		}
-		if status != nil {
-			device.log.Errorf("%v", status)
-			fmt.Fprintf(buffered, "errno=%d\n\n", status.ErrorCode())
-		} else {
-			fmt.Fprintf(buffered, "errno=0\n\n")
-		}
-		buffered.Flush()
+	// handle operation
+	switch op {
+	case "set=1\n":
+		err = device.IpcSetOperation(buffered.Reader)
+	case "get=1\n":
+		err = device.IpcGetOperation(buffered.Writer)
+	default:
+		device.log.Errorf("invalid UAPI operation:%s\n", op)
+		return
+	}
+
+	// write status
+	var status *IPCError
+	if err != nil && !errors.As(err, &status) {
+		// shouldn't happen
+		status = ipcErrorf(ipc.IpcErrorUnknown, "other UAPI error: %w", err)
+	}
+	if status != nil {
+		device.log.Errorf(status.Error())
+		fmt.Fprintf(buffered, "errno=%d\n\n", status.ErrorCode())
+	} else {
+		fmt.Fprintf(buffered, "errno=0\n\n")
 	}
 }

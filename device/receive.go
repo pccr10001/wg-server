@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2022 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2021 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -9,8 +9,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -51,12 +54,12 @@ func (elem *QueueInboundElement) clearPointers() {
  * NOTE: Not thread safe, but called by sequential receiver!
  */
 func (peer *Peer) keepKeyFreshReceiving() {
-	if peer.timers.sentLastMinuteHandshake.Load() {
+	if peer.timers.sentLastMinuteHandshake.Get() {
 		return
 	}
 	keypair := peer.keypairs.Current()
 	if keypair != nil && keypair.isInitiator && time.Since(keypair.created) > (RejectAfterTime-KeepaliveTimeout-RekeyTimeout) {
-		peer.timers.sentLastMinuteHandshake.Store(true)
+		peer.timers.sentLastMinuteHandshake.Set(true)
 		peer.SendHandshakeInitiation(false)
 	}
 }
@@ -162,7 +165,7 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 			elem.Lock()
 
 			// add to decryption queues
-			if peer.isRunning.Load() {
+			if peer.isRunning.Get() {
 				peer.queue.inbound.c <- elem
 				device.queue.decryption.c <- elem
 				buffer = device.GetMessageBuffer()
@@ -267,7 +270,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			// consume reply
 
-			if peer := entry.peer; peer.isRunning.Load() {
+			if peer := entry.peer; peer.isRunning.Get() {
 				device.log.Verbosef("Receiving cookie response from %s", elem.endpoint.DstToString())
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
 					device.log.Verbosef("Could not decrypt invalid cookie response")
@@ -340,7 +343,7 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.SetEndpointFromPacket(elem.endpoint)
 
 			device.log.Verbosef("%v - Received handshake initiation", peer)
-			peer.rxBytes.Add(uint64(len(elem.packet)))
+			atomic.AddUint64(&peer.stats.rxBytes, uint64(len(elem.packet)))
 
 			peer.SendHandshakeResponse()
 
@@ -368,7 +371,7 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.SetEndpointFromPacket(elem.endpoint)
 
 			device.log.Verbosef("%v - Received handshake response", peer)
-			peer.rxBytes.Add(uint64(len(elem.packet)))
+			atomic.AddUint64(&peer.stats.rxBytes, uint64(len(elem.packet)))
 
 			// update timers
 
@@ -425,7 +428,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 		peer.keepKeyFreshReceiving()
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketReceived()
-		peer.rxBytes.Add(uint64(len(elem.packet) + MinMessageSize))
+		atomic.AddUint64(&peer.stats.rxBytes, uint64(len(elem.packet)+MinMessageSize))
 
 		if len(elem.packet) == 0 {
 			device.log.Verbosef("%v - Receiving keepalive packet", peer)
@@ -445,6 +448,9 @@ func (peer *Peer) RoutineSequentialReceiver() {
 			}
 			elem.packet = elem.packet[:length]
 			src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
+			dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
+			fmt.Fprintf(os.Stderr, "Receiver src: %s, dst: %s\n", net.IPv4(src[0], src[1], src[2], src[3]).String(), net.IPv4(dst[0], dst[1], dst[2], dst[3]).String())
+
 			if device.allowedips.Lookup(src) != peer {
 				device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
 				goto skip
