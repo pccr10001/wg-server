@@ -15,10 +15,10 @@ import (
 	"strconv"
 	"syscall"
 
-	"golang.zx2c4.com/wireguard/conn"
-	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/ipc"
-	"golang.zx2c4.com/wireguard/tun"
+	"github.com/pccr10001/wireguard-go/conn"
+	"github.com/pccr10001/wireguard-go/device"
+	"github.com/pccr10001/wireguard-go/ipc"
+	"github.com/pccr10001/wireguard-go/tun"
 )
 
 const (
@@ -107,8 +107,9 @@ func main() {
 		return device.LogLevelError
 	}()
 
-	// open TUN device (or use supplied fd)
+	device.InitRedisClient()
 
+	// open TUN device (or use supplied fd)
 	tun, err := func() (tun.Device, error) {
 		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
 		if tunFdStr == "" {

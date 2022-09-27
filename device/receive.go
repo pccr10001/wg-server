@@ -7,6 +7,8 @@ package device
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,10 +18,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pccr10001/wireguard-go/conn"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
-	"golang.zx2c4.com/wireguard/conn"
 )
 
 type QueueHandshakeElement struct {
@@ -450,6 +452,27 @@ func (peer *Peer) RoutineSequentialReceiver() {
 			src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
 			dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
 			fmt.Fprintf(os.Stderr, "Receiver src: %s, dst: %s\n", net.IPv4(src[0], src[1], src[2], src[3]).String(), net.IPv4(dst[0], dst[1], dst[2], dst[3]).String())
+
+			var cidrs []net.IPNet
+
+			err := RedisClient.Get(context.Background(), base64.StdEncoding.EncodeToString(peer.handshake.remoteStatic[:])).Scan(&cidrs)
+			if err != nil {
+				device.log.Verbosef("Rules not found for peer %v", peer)
+				goto skip
+			}
+
+			allow := false
+			for _, cidr := range cidrs {
+				if cidr.Contains(net.IPv4(src[0], src[1], src[2], src[3])) {
+					allow = true
+					break
+				}
+			}
+
+			if !allow {
+				device.log.Verbosef("IPv4 packet with disallowed destination address from %v", peer)
+				goto skip
+			}
 
 			if device.allowedips.Lookup(src) != peer {
 				device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
