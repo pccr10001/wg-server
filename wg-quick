@@ -118,7 +118,8 @@ auto_su() {
 
 add_if() {
   echo "[!] Missing WireGuard kernel module. Falling back to slow userspace implementation." >&2
-    ./wireguard-go -f "$INTERFACE" &
+    #./wireguard-go -f "$INTERFACE" &
+#    /home/pccr10001/boringtun/target/release/boringtun-cli "$INTERFACE" -v trace -f  --disable-drop-privileges &
     cmd sleep 1
 }
 
@@ -276,6 +277,7 @@ add_default() {
 }
 
 set_config() {
+  echo $WG_CONFIG
   cmd wg setconf "$INTERFACE" <(echo "$WG_CONFIG")
 }
 
@@ -353,8 +355,8 @@ cmd_usage() {
 
 cmd_up() {
   local i
-  [[ -z $(ip link show dev "$INTERFACE" 2>/dev/null) ]] || die "\`$INTERFACE' already exists"
-  trap 'del_if; exit' INT TERM EXIT
+#  [[ -z $(ip link show dev "$INTERFACE" 2>/dev/null) ]] || die "\`$INTERFACE' already exists"
+#  trap 'del_if; exit' INT TERM EXIT
   execute_hooks "${PRE_UP[@]}"
   add_if
   set_config

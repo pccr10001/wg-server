@@ -8,8 +8,10 @@ package device
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/pccr10001/wireguard-go/rule"
 	"io"
 	"net"
 	"net/netip"
@@ -121,7 +123,10 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 				sendf("tx_bytes=%d", atomic.LoadUint64(&peer.stats.txBytes))
 				sendf("rx_bytes=%d", atomic.LoadUint64(&peer.stats.rxBytes))
 				sendf("persistent_keepalive_interval=%d", atomic.LoadUint32(&peer.persistentKeepaliveInterval))
-
+				dst := rule.Get(peer.handshake.remoteStatic[:])
+				if dst != "" {
+					sendf("allowed_dst_ips=%s", dst)
+				}
 				device.allowedips.EntriesForPeer(peer, func(prefix netip.Prefix) bool {
 					sendf("allowed_ip=%s", prefix.String())
 					return true
@@ -383,6 +388,12 @@ func (device *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error 
 			return nil
 		}
 		device.allowedips.Insert(prefix, peer.Peer)
+	case "allowed_dst_ips":
+		device.log.Verbosef("%v - UAPI: Adding allowed_dst_ip", peer.Peer)
+		if peer.dummy {
+			return nil
+		}
+		rule.Set(base64.StdEncoding.EncodeToString(peer.handshake.remoteStatic[:]), value)
 
 	case "protocol_version":
 		if value != "1" {

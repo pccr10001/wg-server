@@ -9,6 +9,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/pccr10001/wireguard-go/rule"
 	"os"
 	"os/signal"
 	"runtime"
@@ -36,32 +37,13 @@ func printUsage() {
 	fmt.Printf("Usage: %s [-f/--foreground] INTERFACE-NAME\n", os.Args[0])
 }
 
-func warning() {
-	switch runtime.GOOS {
-	case "linux", "freebsd", "openbsd":
-		if os.Getenv(ENV_WG_PROCESS_FOREGROUND) == "1" {
-			return
-		}
-	default:
-		return
-	}
-
-	fmt.Fprintln(os.Stderr, "┌──────────────────────────────────────────────────────┐")
-	fmt.Fprintln(os.Stderr, "│                                                      │")
-	fmt.Fprintln(os.Stderr, "│   Running wireguard-go is not required because this  │")
-	fmt.Fprintln(os.Stderr, "│   kernel has first class support for WireGuard. For  │")
-	fmt.Fprintln(os.Stderr, "│   information on installing the kernel module,       │")
-	fmt.Fprintln(os.Stderr, "│   please visit:                                      │")
-	fmt.Fprintln(os.Stderr, "│         https://www.wireguard.com/install/           │")
-	fmt.Fprintln(os.Stderr, "│                                                      │")
-	fmt.Fprintln(os.Stderr, "└──────────────────────────────────────────────────────┘")
-}
-
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
 		fmt.Printf("wireguard-go v%s\n\nUserspace WireGuard daemon for %s-%s.\nInformation available at https://www.wireguard.com.\nCopyright (C) Jason A. Donenfeld <Jason@zx2c4.com>.\n", Version, runtime.GOOS, runtime.GOARCH)
 		return
 	}
+
+	rule.InitMap()
 
 	var foreground bool
 	var interfaceName string
@@ -106,8 +88,6 @@ func main() {
 		}
 		return device.LogLevelError
 	}()
-
-	device.InitRedisClient()
 
 	// open TUN device (or use supplied fd)
 	tun, err := func() (tun.Device, error) {

@@ -1,3 +1,4 @@
 wireguard-go
 wg0.conf
 .idea
+wg-quick
